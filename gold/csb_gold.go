@@ -150,6 +150,22 @@ func normalizeAngleDegrees(angle int) int {
 	return angle
 }
 
+func futureCollisionCourse(main, candidate gamer, dangerzonedist, lookaheadsteps int) (int, SmartVector) {
+	mainV := NewSmartVectorCartesian(float64(main.x), float64(main.y))
+	mainSpeedV := NewSmartVectorCartesian(float64(main.vx), float64(main.vy))
+	candV := NewSmartVectorCartesian(float64(candidate.x), float64(candidate.y))
+	candSpeedV := NewSmartVectorCartesian(float64(candidate.vx), float64(candidate.vy))
+	for step := 1; step <= lookaheadsteps; step++ {
+		mainStepV := mainV.addVector(mainSpeedV.multiplyNumber(float64(step)))
+		candStepV := candV.addVector(candSpeedV.multiplyNumber(float64(step)))
+		distanceV := mainStepV.subtractVector(candStepV)
+		if distanceV.length <= float64(dangerzonedist) {
+			return step, mainSpeedV.multiplyNumber(float64(step))
+		}
+	}
+	return 0, NewSmartVectorCartesian(0, 0)
+}
+
 func movePlayer(playerId int, isLeader bool, state gameState, track map[int]*checkpoint) bool {
 	player := state.players[playerId]
 	checkpoint := track[player.nextCheckPointId]
@@ -173,34 +189,32 @@ func movePlayer(playerId int, isLeader bool, state gameState, track map[int]*che
 	longDistanceAimV := NewSmartVectorCartesian(float64(checkpoint.longDistanceAimpoint.x-x), float64(checkpoint.longDistanceAimpoint.y-y))
 
 	fmt.Fprintf(os.Stderr, "player: %+v\n", player)
-	fmt.Fprintf(os.Stderr, "targetV: %+v\n", targetV)
 	nextCheckpointAngle := normalizeAngleDegrees(int(checkpointV.angleDegrees) - player.angle)
-	fmt.Fprintf(os.Stderr, "nextCheckpointAngle: %d\n", nextCheckpointAngle)
 	nextCheckpointDist := int(targetV.length)
 
 	var thrust int
 	var useShield bool
 	useBoost := false
 	firstStretch := (player.currentlap == 1 && player.nextCheckPointId == 1)
-	thirdLap := partner.currentlap == 3 || opponents[0].currentlap == 3 || opponents[1].currentlap == 3
+	// thirdLap := partner.currentlap >= 3 || opponents[0].currentlap >= 3 || opponents[1].currentlap >= 3
 
 	neverAgressive := false // true value only for debugging
 	if isLeader || neverAgressive || firstStretch {
 		targetV, thrust = normalMove(nextCheckpointAngle, targetV, longDistanceAimV, theCheckpointAfterV, currentSpeedV, x, y, nextCheckpointDist)
 		useShield = nextCheckpointDist < 1000 && (toOpponent0V.length < 900 || toOpponent1V.length < 900)
-		if (player.currentlap != 1 || player.nextCheckPointId != 1) {
-			shieldDistance := math.Min(400 + currentSpeedV.length * 2, 800)
+		if player.currentlap != 1 || player.nextCheckPointId != 1 {
+			shieldDistance := math.Min(400+currentSpeedV.length*2, 800)
 			fmt.Fprintf(os.Stderr, "ShieldDistance: %f, currspeed: %f\n", shieldDistance, currentSpeedV.length)
-			useShield = useShield || ((toOpponent0V.length < shieldDistance || toOpponent1V.length < shieldDistance) && currentSpeedV.length > 20 )
+			useShield = useShield || ((toOpponent0V.length < shieldDistance || toOpponent1V.length < shieldDistance) && currentSpeedV.length > 20)
 		}
 		useBoost = (state.first && isLeader) || (!state.usedboost && nextCheckpointDist > 5500 && nextCheckpointAngle < 3 && nextCheckpointAngle > -3 && toOpponent0V.length > 2000 && toOpponent1V.length > 2000)
-	} else if thirdLap || opponentLeads(state.players, state.opponents) {
-		targetV, thrust = fullDefenseMode(track, player, opponents, x, y, currentSpeedV)
-		shieldDistance := 600 + currentSpeedV.length * 2
-		useShield = useShield || ((toOpponent0V.length < shieldDistance || toOpponent1V.length < shieldDistance) && currentSpeedV.length > 10)
+	} else if opponentLeads(state.players, state.opponents) {
+		targetV, thrust = fullDefenseMode(track, player, partner, opponents, x, y, currentSpeedV)
+		useShield = shouldUseShield(player, opponents, useShield)
 	} else {
 		targetV, thrust = aggroMove(nextCheckpointAngle, targetV, longDistanceAimV, theCheckpointAfterV, currentSpeedV, x, y, nextCheckpointDist, toOpponent0V, toOpponent1V)
-		useShield = useShield || ((toOpponent0V.length < 1000 || toOpponent1V.length < 1000) && currentSpeedV.length > 20)
+		// useShield = useShield || ((toOpponent0V.length < 1000 || toOpponent1V.length < 1000) && currentSpeedV.length > 20)
+		useShield = shouldUseShield(player, opponents, useShield)
 	}
 	fmt.Fprintf(os.Stderr, "targetV: %v\n", targetV)
 
@@ -218,6 +232,13 @@ func movePlayer(playerId int, isLeader bool, state gameState, track map[int]*che
 		fmt.Printf("%d %d %d\n", x+targetX, y+targetY, thrust)
 	}
 	return useBoost
+}
+
+func shouldUseShield(player gamer, opponents [2]gamer, useShield bool) bool {
+	oppCollSteps0, _ := futureCollisionCourse(player, opponents[0], 800, 2)
+	oppCollSteps1, _ := futureCollisionCourse(player, opponents[1], 800, 2)
+	useShield = useShield || oppCollSteps0 > 0 || oppCollSteps1 > 0
+	return useShield
 }
 
 func normalMove(nextCheckpointAngle int, targetV, longDistanceAimV, theCheckpointAfterV, currentSpeedV SmartVector, x, y, nextCheckpointDist int) (SmartVector, int) {
@@ -271,10 +292,8 @@ func aggroMove(nextCheckpointAngle int, defaultTargetV, longDistanceAimV, theChe
 	return aggroTargetV, thrust
 }
 
-func fullDefenseMode(track map[int]*checkpoint, player gamer, opponents [2]gamer, x, y int, currentSpeedV SmartVector) (SmartVector, int) {
+func fullDefenseMode(track map[int]*checkpoint, player, partner gamer, opponents [2]gamer, x, y int, currentSpeedV SmartVector) (SmartVector, int) {
 	fmt.Fprintln(os.Stderr, "FULL DEFENSE MODE")
-	//goalpoint := track[0].center
-	//lastcheckpoint := track[len(track)-1].center
 	opponentLeaderId := determineLeader(opponents)
 	opponentLeader := opponents[opponentLeaderId]
 	opponentCheckpoint := track[opponentLeader.nextCheckPointId].center
@@ -283,46 +302,56 @@ func fullDefenseMode(track map[int]*checkpoint, player gamer, opponents [2]gamer
 	toOpponentTargetV := NewSmartVectorCartesian(float64(opponentCheckpoint.x-x), float64(opponentCheckpoint.y-y))
 	opponentToTargetV := NewSmartVectorCartesian(float64(opponentCheckpoint.x-opponentLeader.x), float64(opponentCheckpoint.y-opponentLeader.x))
 	toOpponentNextTargetV := NewSmartVectorCartesian(float64(opponentNextCheckpoint.x-x), float64(opponentNextCheckpoint.y-y))
-	midpoint := point{(opponentCheckpoint.x + opponentLeader.x) / 2, (opponentCheckpoint.y + opponentLeader.y) / 2}
-	midpointV := NewSmartVectorCartesian(float64(midpoint.x-x), float64(midpoint.y-y))
 
-	aggroTargetV := midpointV
-	thrust := 100
-	if toOpponentTargetV.length < 800 {
-		aggroTargetV = toOpponentV
-	} else if toOpponentTargetV.length > opponentToTargetV.length && (opponentLeader.nextCheckPointId > 0 || opponentLeader.currentlap < 3) {
-		aggroTargetV = toOpponentNextTargetV
-	} else if midpointV.length > opponentToTargetV.length / 2 {
-		aggroTargetV = toOpponentTargetV
+	distanceToOpponent := toOpponentV.length
+	magicAngleRadians := (180 - float64(normalizeAngleDegrees(int(toOpponentV.angleDegrees-opponentToTargetV.angleDegrees)))) / 180 * math.Pi
+	distanceToIntersection := math.Abs(distanceToOpponent / 2 * math.Tan(magicAngleRadians))
+	fmt.Fprintf(os.Stderr, "magicAngle: %f, distToOpp: %f, distToInt: %f\n", magicAngleRadians, distanceToOpponent, distanceToIntersection)
+	opponentToIntersectionV := NewSmartVectorPolar(distanceToIntersection, opponentToTargetV.angleDegrees)
+	toIntersectionV := opponentToIntersectionV.addVector(toOpponentV)
+
+	aggroTargetV := toIntersectionV
+	if aggroTargetV.length > opponentToTargetV.length {
+		if opponentLeader.nextCheckPointId > 0 || opponentLeader.currentlap < 3 {
+			aggroTargetV = toOpponentNextTargetV
+			if toOpponentNextTargetV.length < 1200 {
+				aggroTargetV = toOpponentV
+			}
+		} else {
+			aggroTargetV = toOpponentTargetV
+			if toOpponentTargetV.length < 1200 {
+				aggroTargetV = toOpponentV
+			}
+		}
 	}
+
+	collsteps, collisionV := futureCollisionCourse(player, partner, 800, 10)
+	if collsteps > 0 && collisionV.length < aggroTargetV.length {
+		diffAngle := normalizeAngleDegrees(int(aggroTargetV.angleDegrees - collisionV.angleDegrees))
+		if diffAngle > 0 {
+			aggroTargetV = NewSmartVectorPolar(aggroTargetV.length, collisionV.angleDegrees + 30)
+		} else {
+			aggroTargetV = NewSmartVectorPolar(aggroTargetV.length, collisionV.angleDegrees - 30)
+		}
+		fmt.Fprintf(os.Stderr, "COLLISIONPATH  V: %v\n", collisionV)
+		fmt.Fprintf(os.Stderr, "COLLISIONAVOID V: %v\n", aggroTargetV)
+	}
+
+	if math.Abs(float64(normalizeAngleDegrees(int(aggroTargetV.angleDegrees - currentSpeedV.angleDegrees)))) < 40 {
+		aggroTargetV = smartDirectionChangeVector(aggroTargetV, currentSpeedV)
+	}
+
+	thrust := 100
+
 	targetAngle := normalizeAngleDegrees(int(aggroTargetV.angleDegrees) - player.angle)
 	if targetAngle > 90 || targetAngle < -90 {
 		thrust = 1
-	} else if targetAngle > 45 || targetAngle < -45 {
-		thrust = 70
+	} else if targetAngle > 60 || targetAngle < -60 {
+		thrust = 10
+	} else if targetAngle > 30 || targetAngle < -30 {
+		thrust = 40
 	}
 	return aggroTargetV, thrust
-}
-
-func getDirectionSmartVector_deprecated(nextCheckpointAngle int, targetV SmartVector, longDistanceAimV SmartVector, theCheckpointAfterV SmartVector, lastMoveV SmartVector, x int, y int, smartDirectionV SmartVector) SmartVector {
-	viabilityAngle := normalizeAngleDegrees(int(longDistanceAimV.angleDegrees - targetV.angleDegrees))
-	if math.Abs(float64(viabilityAngle)) < 45 && targetV.length > 5500 {
-		smartDirectionV = longDistanceAimV
-		fmt.Fprintf(os.Stderr, "USING SMARTDIRECTION: %+v\n", smartDirectionV)
-	} else if targetV.length > 1500 && (math.Abs(float64(nextCheckpointAngle)) < 20 || (targetV.length < 2000 && math.Abs(float64(nextCheckpointAngle)) < 45)) {
-		desiredAngle := targetV.angleDegrees
-		deltaAngle := normalizeAngleDegrees(int(desiredAngle - lastMoveV.angleDegrees))
-		fmt.Fprintf(os.Stderr, "deltaAngle: %f, lastMoveV.angleDegrees: %f\n", deltaAngle, lastMoveV.angleDegrees)
-		newTargetAngle := desiredAngle + (float64(deltaAngle))
-		smartDirectionV = NewSmartVectorPolar(targetV.length, newTargetAngle)
-		fmt.Fprintf(os.Stderr, "desiredAngle: %f, newTargetAngle: %f\n", desiredAngle, newTargetAngle)
-		fmt.Fprintf(os.Stderr, "smartDirectionV.x: %d, smartDirectionV.y: %d\n", int(smartDirectionV.x), int(smartDirectionV.y))
-		fmt.Fprintf(os.Stderr, "nextx: %d, nexty: %d\n", x+int(smartDirectionV.x), y+int(smartDirectionV.y))
-	} else if (targetV.length < 1500) && (math.Abs(float64(nextCheckpointAngle)) < 10) {
-		fmt.Fprintln(os.Stderr, "Oh so close, target next")
-		smartDirectionV = theCheckpointAfterV
-	}
-	return smartDirectionV
 }
 
 func getDirectionSmartVector(nextCheckpointAngle int, targetV SmartVector, longDistanceAimV SmartVector, theCheckpointAfterV SmartVector, currentSpeedV SmartVector, x int, y int, smartDirectionV SmartVector) SmartVector {
@@ -339,18 +368,22 @@ func getDirectionSmartVector(nextCheckpointAngle int, targetV SmartVector, longD
 		fmt.Fprintln(os.Stderr, "Cut the curve")
 		smartDirectionV = theCheckpointAfterV
 	} else if targetV.length > 1500 && (math.Abs(float64(nextCheckpointAngle)) < 20 || (targetV.length < 2000 && math.Abs(float64(nextCheckpointAngle)) < 45)) {
-		desiredAngle := targetV.angleDegrees
-		deltaAngle := normalizeAngleDegrees(int(desiredAngle - currentSpeedV.angleDegrees))
-		fmt.Fprintf(os.Stderr, "deltaAngle: %f, lastMoveV.angleDegrees: %f\n", deltaAngle, currentSpeedV.angleDegrees)
-		newTargetAngle := desiredAngle + (float64(deltaAngle))
-		smartDirectionV = NewSmartVectorPolar(targetV.length, newTargetAngle)
-		fmt.Fprintf(os.Stderr, "desiredAngle: %f, newTargetAngle: %f\n", desiredAngle, newTargetAngle)
-		fmt.Fprintf(os.Stderr, "smartDirectionV.x: %d, smartDirectionV.y: %d\n", int(smartDirectionV.x), int(smartDirectionV.y))
-		fmt.Fprintf(os.Stderr, "nextx: %d, nexty: %d\n", x+int(smartDirectionV.x), y+int(smartDirectionV.y))
+		smartDirectionV = smartDirectionChangeVector(targetV, currentSpeedV)
 	} else if (targetV.length < 1500) && (math.Abs(float64(nextCheckpointAngle)) < 10) {
 		fmt.Fprintln(os.Stderr, "Oh so close, target next")
 		smartDirectionV = theCheckpointAfterV
 	}
+	return smartDirectionV
+}
+
+func smartDirectionChangeVector(targetV SmartVector, currentSpeedV SmartVector) SmartVector {
+	desiredAngle := targetV.angleDegrees
+	deltaAngle := normalizeAngleDegrees(int(desiredAngle - currentSpeedV.angleDegrees))
+	fmt.Fprintf(os.Stderr, "deltaAngle: %f, lastMoveV.angleDegrees: %f\n", deltaAngle, currentSpeedV.angleDegrees)
+	newTargetAngle := desiredAngle + (float64(deltaAngle))
+	smartDirectionV := NewSmartVectorPolar(targetV.length, newTargetAngle)
+	fmt.Fprintf(os.Stderr, "desiredAngle: %f, newTargetAngle: %f\n", desiredAngle, newTargetAngle)
+	fmt.Fprintf(os.Stderr, "smartDirectionV.x: %d, smartDirectionV.y: %d\n", int(smartDirectionV.x), int(smartDirectionV.y))
 	return smartDirectionV
 }
 
