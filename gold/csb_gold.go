@@ -337,7 +337,7 @@ func fullDefenseMode(player, partner gamer, track map[int]*checkpoint, opponents
 				aggroTargetV = toOpponentV
 			}
 		} else {
-			aggroTargetV = toOpponentTargetV
+			//aggroTargetV = toOpponentTargetV
 			if toOpponentTargetV.length < 1200 {
 				aggroTargetV = toOpponentV
 			}
